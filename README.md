@@ -130,3 +130,8 @@ log 不再出現「Unsloth 快取修補」字樣,代表上游已修復,可移除
 - `ipc: host` 是必要的,否則 DataLoader 多 worker 會因共享記憶體不足而失敗。
 - `work/unsloth_compiled_cache/`、`work/outputs/`、`webui-data/`、`.env`
   皆不進版控(見 `.gitignore`)。
+
+## 授權
+
+本專案以 [Apache License 2.0](LICENSE) 授權。vendored 的 `unsloth/` 目錄
+同為 Apache-2.0,原始授權檔隨附於該目錄內。
