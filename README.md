@@ -1,122 +1,141 @@
-# LoRA Forge — Unsloth LoRA/QLoRA 訓練環境
+# LoRA Forge — Unsloth LoRA/QLoRA Training Environment
 
-以 [Unsloth](https://github.com/unslothai/unsloth) 官方映像檔為基底的 LoRA/QLoRA
-微調環境,針對 RTX 5090(Blackwell, sm_120)。目標模型:Gemma 4 12B、Qwen3.5、
-Qwen3.6 系列。內附 **LoRA Forge WebUI**,可從瀏覽器建立、取消、續跑與監看訓練任務,
-並載入過去的訓練設定重複使用。
+A LoRA/QLoRA fine-tuning environment built on the official
+[Unsloth](https://github.com/unslothai/unsloth) Docker image, targeting the
+RTX 5090 (Blackwell, sm_120). Target models: Gemma 4 12B, Qwen3.5, and the
+Qwen3.6 family. Ships with the **LoRA Forge WebUI** for creating, cancelling,
+resuming, and monitoring training jobs from the browser, including one-click
+reuse of past training configurations.
 
-## 目錄結構
+## Directory layout
 
 ```
 llm_lora_train/
-├── Dockerfile             # 官方 unsloth/unsloth 映像檔 + 本地原始碼 editable install
-├── docker-compose.yml     # GPU(Docker 原生 CDI)、ports、volumes 設定
-├── .env.example           # 環境變數範本(複製成 .env 使用)
-├── DESIGN.md              # WebUI 設計系統(Linear 風格 dark theme)
-├── unsloth/               # Unsloth 原始碼(vendored,見下方說明)
-├── webui/                 # LoRA Forge FastAPI 後端 + 原生 JS 前端
-├── tests/                 # pytest 測試(容器內唯讀掛載)
-├── webui-data/            # WebUI 任務、log、私有 HF token(執行後產生,不進版控)
-└── work/                  # 掛載到 /workspace/work
-    ├── webui_runner.py    # WebUI 的通用 Unsloth 訓練 runner
-    ├── patches/           # Unsloth compiled cache 自動修補(見下方說明)
-    └── check_env.py       # 環境健檢腳本
+├── Dockerfile             # Official unsloth/unsloth image + local source editable install
+├── docker-compose.yml     # GPU (Docker native CDI), ports, volumes
+├── .env.example           # Environment variable template (copy to .env)
+├── DESIGN.md              # WebUI design system (Linear-style dark theme)
+├── unsloth/               # Unsloth source code (vendored, see below)
+├── webui/                 # LoRA Forge FastAPI backend + vanilla JS frontend
+├── tests/                 # pytest suite (mounted read-only in the container)
+├── webui-data/            # WebUI jobs, logs, private HF token (created at runtime, not in VCS)
+└── work/                  # Mounted at /workspace/work
+    ├── webui_runner.py    # Generic Unsloth training runner used by the WebUI
+    ├── patches/           # Unsloth compiled-cache auto-repair (see below)
+    └── check_env.py       # Environment health-check script
 ```
 
-## 前置需求
+## Prerequisites
 
-- NVIDIA driver 與 [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html) ≥ 1.19,
-  且已產生 CDI 規格 `/etc/cdi/nvidia.yaml`(通常由 `nvidia-cdi-refresh.service` 自動維護;
-  沒有的話執行 `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`)
-- Docker ≥ 28(compose 使用 Docker 原生 CDI 掛載 GPU)
-- 把自己加入 docker 群組(一次性):
+- NVIDIA driver and [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/index.html) ≥ 1.19,
+  with the CDI spec `/etc/cdi/nvidia.yaml` generated (usually kept up to date by
+  `nvidia-cdi-refresh.service`; otherwise run
+  `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`)
+- Docker ≥ 28 (compose mounts the GPU via Docker native CDI)
+- Add yourself to the docker group (one-time):
 
 ```bash
 sudo usermod -aG docker $USER
-newgrp docker   # 或登出再登入
+newgrp docker   # or log out and back in
 ```
 
-## 使用方式
+## Usage
 
 ```bash
-cp .env.example .env       # 填入 HF_TOKEN(Gemma 是 gated model,必填)
+cp .env.example .env       # fill in HF_TOKEN (required for gated models such as Gemma)
 
-docker compose build       # 首次建置(會拉官方映像檔,體積大、需要一段時間)
-docker compose up -d       # 啟動
-docker compose exec unsloth python /workspace/work/check_env.py   # 健檢
+docker compose build       # first build (pulls the official image; large, takes a while)
+docker compose up -d       # start
+docker compose exec unsloth python /workspace/work/check_env.py   # health check
 
-docker compose exec unsloth bash   # 進容器 shell
+docker compose exec unsloth bash   # shell into the container
 ```
 
-服務入口:
+Service endpoints:
 
-| 服務 | 位置 |
+| Service | Location |
 |---|---|
 | LoRA Forge WebUI | http://localhost:6003 |
-| JupyterLab | http://localhost:6001(密碼 = `.env` 的 `JUPYTER_PASSWORD`) |
-| Unsloth Studio(選用) | http://localhost:6002 |
+| JupyterLab | http://localhost:6001 (password = `JUPYTER_PASSWORD` in `.env`) |
+| Unsloth Studio (optional) | http://localhost:6002 |
 | SSH | port 6022 |
 
-> **安全性**:WebUI 沒有登入驗證,而 compose 的 port 綁定是所有網路介面。
-> 若機器不在信任的網路,請把 `docker-compose.yml` 的 `"6003:8080"` 改成
-> `"127.0.0.1:6003:8080"`,改用 SSH port forward 存取;不要在沒有驗證與 TLS
-> 的情況下直接公開到網際網路。
+> **Security**: the WebUI has no authentication, and the compose port bindings
+> listen on all interfaces. If the machine is not on a trusted network, change
+> `"6003:8080"` in `docker-compose.yml` to `"127.0.0.1:6003:8080"` and access
+> it through an SSH port forward. Do not expose it directly to the internet
+> without authentication and TLS.
 
 ## LoRA Forge WebUI
 
-開啟 <http://localhost:6003>。主要功能:
+Open <http://localhost:6003>. Main features:
 
-- FineTome、Complete FABLE 與 Gemma 4 三種開箱 preset。
-- **載入過去設定**:從歷史任務清單一鍵帶入先前的完整訓練參數(不含 HF token)。
-- 設定模型、資料格式、LoRA rank/alpha、context、batch 與訓練排程。
-- 同一時間只執行一個 GPU 訓練任務;背景訓練、即時 log、取消與 checkpoint 續跑。
-- 掃描 `work/outputs` 中已完成的 PEFT adapter。
-- HF token 只寫入 `webui-data/hf_token`,不放進任務 JSON 或 log。
+- Three ready-made presets: FineTome, Complete FABLE, and Gemma 4.
+- **Load past configurations**: pick a historical job from the list and fill
+  the form with its full training parameters in one click (HF token excluded).
+- Configure model, data format, LoRA rank/alpha, context length, batch size,
+  and training schedule.
+- Only one GPU training job runs at a time; background training, live logs,
+  cancellation, and checkpoint resume.
+- Scans `work/outputs` for completed PEFT adapters.
+- The HF token is written only to `webui-data/hf_token`, never into job JSON
+  or logs.
 
-測試:
+Tests:
 
 ```bash
 docker compose run --rm --no-deps --entrypoint /opt/venv/bin/pytest webui -q /workspace/tests
 node --check webui/static/app.js
 ```
 
-## GPU 掛載:Docker 原生 CDI
+## GPU access: Docker native CDI
 
-compose 以 Docker 原生 CDI(`driver: cdi` + `nvidia.com/gpu=all`)取代 `gpus: all`。
-原因:傳統 nvidia runtime hook 是在 cgroup 之外直接改裝置權限,宿主機每次
-`systemctl daemon-reload` 都可能收回長駐容器的 GPU 存取權(症狀:訓練突然報
-`Can't initialize NVML`)。CDI 把裝置權限寫進 OCI 規格、systemd 可見,一勞永逸。
-此設定只作用在本專案,不需要動 `/etc/nvidia-container-runtime/config.toml`
-的全域模式,不影響機器上其他使用 `gpus: all` 的容器。
+The compose file uses Docker native CDI (`driver: cdi` + `nvidia.com/gpu=all`)
+instead of `gpus: all`. Rationale: the legacy nvidia runtime hook edits device
+permissions outside of cgroups, so any `systemctl daemon-reload` on the host
+can revoke GPU access from long-running containers (symptom: training suddenly
+fails with `Can't initialize NVML`). CDI writes device permissions into the OCI
+spec where systemd can see them, fixing this for good. The setting is scoped to
+this project only — it does not touch the global mode in
+`/etc/nvidia-container-runtime/config.toml` and does not affect other
+containers on the machine that use `gpus: all`.
 
-## work/patches — Unsloth 快取自動修補
+## work/patches — Unsloth compiled-cache auto-repair
 
-unsloth_zoo 以 `inspect.getsource` 反編譯 transformers 模組產生
-`work/unsloth_compiled_cache/`。transformers 5.14 的 `@force_accelerate_hooks`
-裝飾器缺 `functools.wraps`,導致 Qwen3.5/3.6(GatedDeltaNet 層)的產生碼出現
-`NameError: name 'args' is not defined`。
+unsloth_zoo decompiles transformers modules with `inspect.getsource` to
+generate `work/unsloth_compiled_cache/`. The `@force_accelerate_hooks`
+decorator in transformers 5.14 lacks `functools.wraps`, so the generated code
+for Qwen3.5/3.6 (the GatedDeltaNet layer) crashes with
+`NameError: name 'args' is not defined`.
 
-`webui_runner.py` 在每次訓練啟動時自動執行兩層防護:
+`webui_runner.py` runs a two-layer guard at every training start:
 
-1. `patches/sanitize_unsloth_cache.py`:掃描既有快取,修復壞掉的 forward stub
-   (無法修復就刪掉讓 unsloth 重新產生)。
-2. 依 `AutoConfig.model_type` 對正在使用的 transformers 模組還原被裝飾的
-   forward,避免升級後重新產生出壞的快取。
+1. `patches/sanitize_unsloth_cache.py`: scans the existing cache and repairs
+   broken forward stubs (unfixable files are deleted so unsloth regenerates
+   them).
+2. Restores the decorated forwards of the transformers module actually in use
+   (looked up via `AutoConfig.model_type`), preventing broken caches from
+   being regenerated after upgrades.
 
-升級 unsloth / unsloth_zoo / transformers 後不需要手動處理。若某次升級後訓練
-log 不再出現「Unsloth 快取修補」字樣,代表上游已修復,可移除此 patch。
-詳見 [work/patches/README.md](work/patches/README.md)。
+No manual steps are needed after upgrading unsloth / unsloth_zoo /
+transformers. If the training log stops showing the「Unsloth 快取修補」line
+after an upgrade, upstream has fixed the bug and this patch can be removed.
+See [work/patches/README.md](work/patches/README.md) for details.
 
-## unsloth/ — vendored 原始碼
+## unsloth/ — vendored source
 
-`unsloth/` 是 [unslothai/unsloth](https://github.com/unslothai/unsloth) 的完整原始碼
-(vendored 自 upstream commit `bb80602`,2026-07-14,Apache-2.0 授權,LICENSE 隨附於
-目錄內),已移除其 `.git`,由本專案的 git 直接管理。容器以 editable install 指向
-這個目錄,修改原始碼後**下一個訓練任務**即生效(每個任務都是獨立 python 程序),
-不需要重建映像檔;JupyterLab 中已載入 unsloth 的 kernel 需重啟才會生效。
+`unsloth/` is the full source of
+[unslothai/unsloth](https://github.com/unslothai/unsloth) (vendored from
+upstream commit `bb80602`, 2026-07-14, Apache-2.0; the original LICENSE ships
+inside the directory). Its `.git` has been removed and the directory is
+managed directly by this project's git. The container points an editable
+install at this directory, so source changes take effect on the **next
+training job** (each job is a separate python process) — no image rebuild
+required. JupyterLab kernels that already imported unsloth need a restart.
 
-> 注意:WebUI 的「Unsloth 版本」頁是 git-based(檢查更新、切 tag、rollback),
-> 在 vendored 模式下會顯示不可用。要更新 unsloth 請手動同步 upstream,例如:
+> Note: the WebUI's "Unsloth version" page is git-based (check for updates,
+> pin tags, rollback) and shows as unavailable in vendored mode. To update
+> unsloth, sync upstream manually, for example:
 >
 > ```bash
 > git clone --depth 1 https://github.com/unslothai/unsloth.git /tmp/unsloth-new
@@ -124,14 +143,17 @@ log 不再出現「Unsloth 快取修補」字樣,代表上游已修復,可移除
 > git add unsloth && git commit -m "unsloth: sync upstream <commit>"
 > ```
 
-## 注意事項
+## Notes
 
-- 模型快取存在名為 `hf-cache` 的 docker volume,重建容器不會重新下載模型。
-- `ipc: host` 是必要的,否則 DataLoader 多 worker 會因共享記憶體不足而失敗。
-- `work/unsloth_compiled_cache/`、`work/outputs/`、`webui-data/`、`.env`
-  皆不進版控(見 `.gitignore`)。
+- Model caches live in a docker volume named `hf-cache`; rebuilding containers
+  does not re-download models.
+- `ipc: host` is required — without it, multi-worker DataLoaders fail due to
+  insufficient shared memory.
+- `work/unsloth_compiled_cache/`, `work/outputs/`, `webui-data/`, and `.env`
+  are excluded from version control (see `.gitignore`).
 
-## 授權
+## License
 
-本專案以 [Apache License 2.0](LICENSE) 授權。vendored 的 `unsloth/` 目錄
-同為 Apache-2.0,原始授權檔隨附於該目錄內。
+This project is licensed under the [Apache License 2.0](LICENSE). The vendored
+`unsloth/` directory is likewise Apache-2.0, with its original license file
+shipped inside the directory.
