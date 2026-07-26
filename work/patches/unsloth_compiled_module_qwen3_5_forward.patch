@@ -1,0 +1,36 @@
+--- a/work/unsloth_compiled_cache/unsloth_compiled_module_qwen3_5.py
++++ b/work/unsloth_compiled_cache/unsloth_compiled_module_qwen3_5.py
+@@ -501,6 +501,10 @@
+ 
+     return output
+ 
++# Qwen3_5GatedDeltaNet 在此仍是 transformers 原版類別（下方類別定義才會遮蔽它），
++# 其 forward 已帶正確的 force_accelerate_hooks 包裝，直接委派即可。
++_unsloth_patch_original_Qwen3_5GatedDeltaNet_forward = Qwen3_5GatedDeltaNet.forward
++
+ class Qwen3_5GatedDeltaNet(nn.Module):
+     def __init__(self, config: Qwen3_5Config, layer_idx: int):
+         super().__init__()
+@@ -567,7 +571,6 @@
+         self.in_proj_b = nn.Linear(self.hidden_size, self.num_v_heads, bias=False)
+         self.in_proj_a = nn.Linear(self.hidden_size, self.num_v_heads, bias=False)
+ 
+-    @force_accelerate_hooks("conv1d")
+     def forward(
+         self,
+         hidden_states: torch.Tensor,
+@@ -575,7 +578,13 @@
+         attention_mask: torch.Tensor | None = None,
+         **kwargs: Unpack[TransformersKwargs],
+     ):
+-        return wrapped(self, *args, **kwargs)
++        return _unsloth_patch_original_Qwen3_5GatedDeltaNet_forward(
++            self,
++            hidden_states=hidden_states,
++            cache_params=cache_params,
++            attention_mask=attention_mask,
++            **kwargs,
++        )
+ 
+ 
+ @torch.compile(fullgraph = True, dynamic = True, options = torch_compile_options)

@@ -1,0 +1,10 @@
+.env
+.pytest_cache/
+**/__pycache__/
+*.py[cod]
+webui-data/
+work/outputs/
+work/unsloth_compiled_cache/
+work/*.log
+lora-forge-*.png
+unsloth/studio/frontend/bun.lockb

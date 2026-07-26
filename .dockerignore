@@ -1,0 +1,8 @@
+unsloth/.git
+work/
+webui-data/
+.pytest_cache/
+**/__pycache__/
+lora-forge-*.png
+.env
+*.md

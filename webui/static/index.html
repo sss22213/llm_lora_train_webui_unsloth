@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Unsloth LoRA and QLoRA training workspace">
+  <title>LoRA Forge</title>
+  <link rel="stylesheet" href="/static/styles.css?v=3">
+</head>
+<body>
+  <header class="topbar">
+    <button class="mobile-menu" id="mobileMenu" aria-label="開啟導覽">☰</button>
+    <div class="brand">
+      <span class="brand-mark">F</span>
+      <span>LoRA Forge</span>
+      <span class="brand-suffix">Unsloth workspace</span>
+    </div>
+    <div class="top-actions">
+      <span class="system-chip"><span class="status-dot" id="healthDot"></span><span id="healthText">檢查服務中</span></span>
+      <a class="docs-link" href="/api/docs" target="_blank" rel="noreferrer">API</a>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div>
+        <p class="nav-label">WORKSPACE</p>
+        <nav aria-label="主要導覽">
+          <button class="nav-item active" data-view="overview"><span class="nav-icon">⌂</span><span>總覽</span></button>
+          <button class="nav-item" data-view="create"><span class="nav-icon">＋</span><span>建立訓練</span></button>
+          <button class="nav-item" data-view="jobs"><span class="nav-icon">≡</span><span>任務紀錄</span><span class="count" id="jobCount">0</span></button>
+          <button class="nav-item" data-view="adapters"><span class="nav-icon">◇</span><span>Adapters</span><span class="count" id="adapterCount">0</span></button>
+          <button class="nav-item" data-view="versions"><span class="nav-icon">↻</span><span>Unsloth 版本</span></button>
+        </nav>
+      </div>
+      <div class="sidebar-system">
+        <div class="sidebar-system-title"><span class="status-dot ok"></span><span>運算環境</span></div>
+        <p id="sidebarGpu">正在偵測 GPU...</p>
+        <small id="sidebarVersions">Unsloth environment</small>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <section class="view active" id="overviewView">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">TRAINING CONTROL PLANE</p>
+            <h1>把微調流程收進一個工作區</h1>
+            <p class="page-subtitle">建立 QLoRA 任務、追蹤 GPU 與 log，集中管理輸出的 adapter。</p>
+          </div>
+          <button class="primary jump-create">建立訓練</button>
+        </div>
+
+        <div class="stat-grid">
+          <article class="stat-card"><span>服務狀態</span><strong id="statService">檢查中</strong><small id="statRunner">Runner —</small></article>
+          <article class="stat-card"><span>GPU 使用率</span><strong id="statGpuUtil">—</strong><small id="statGpuMemory">等待 NVIDIA 資訊</small></article>
+          <article class="stat-card"><span>訓練任務</span><strong id="statJobs">0</strong><small id="statActiveJob">目前閒置</small></article>
+          <article class="stat-card"><span>LoRA Adapters</span><strong id="statAdapters">0</strong><small id="statDisk">正在計算儲存空間</small></article>
+        </div>
+
+        <div class="overview-grid">
+          <section class="panel gpu-panel">
+            <div class="panel-heading"><div><p class="eyebrow">COMPUTE</p><h2>GPU 即時狀態</h2></div><button class="secondary" id="refreshSystem">重新整理</button></div>
+            <div id="gpuCards" class="gpu-cards"><div class="empty-state">正在讀取 nvidia-smi...</div></div>
+          </section>
+          <section class="panel active-panel">
+            <div class="panel-heading"><div><p class="eyebrow">EXECUTION</p><h2>目前任務</h2></div></div>
+            <div id="activeJobCard" class="active-job-card"><div class="empty-state">GPU 目前閒置，可以建立新任務。</div></div>
+          </section>
+        </div>
+
+        <section class="preset-section">
+          <div class="panel-heading"><div><p class="eyebrow">QUICK START</p><h2>從可驗證的組合開始</h2><p>預設只跑 100 steps，先確認資料格式與 loss mask。</p></div></div>
+          <div class="preset-grid">
+            <button class="preset-card" data-preset="qwen-finetome"><span class="preset-tag">CHAT SFT</span><strong>Qwen 3.5 + FineTome</strong><small>一般對話 QLoRA 冒煙測試</small><span>套用設定 →</span></button>
+            <button class="preset-card" data-preset="qwen-fable"><span class="preset-tag">CODING AGENT</span><strong>Qwen 3.5 + FABLE</strong><small>工具呼叫與 coding trace，僅訓練最後目標</small><span>套用設定 →</span></button>
+            <button class="preset-card" data-preset="gemma-finetome"><span class="preset-tag">MULTIMODAL BASE</span><strong>Gemma 4 + FineTome</strong><small>只微調語言層，不修改 vision tower</small><span>套用設定 →</span></button>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" id="createView">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">NEW TRAINING RUN</p>
+            <h1>建立 LoRA / QLoRA 訓練</h1>
+            <p class="page-subtitle">先選一個 preset，再依模型與資料集調整。敏感 token 不會寫進任務設定或 log。</p>
+          </div>
+          <span class="upstream">Unsloth · TRL</span>
+        </div>
+
+        <div class="preset-switcher" role="group" aria-label="訓練 preset">
+          <button type="button" data-preset="qwen-finetome">Qwen Chat</button>
+          <button type="button" data-preset="qwen-fable">Qwen FABLE</button>
+          <button type="button" data-preset="gemma-finetome">Gemma 4</button>
+        </div>
+
+        <div class="history-loader" id="historyLoader" hidden>
+          <span class="history-label">載入過去設定</span>
+          <select id="historySelect" aria-label="選擇過去的訓練任務"></select>
+          <button type="button" class="secondary" id="historyApplyButton">載入</button>
+        </div>
+
+        <form id="trainingForm">
+          <div class="form-layout">
+            <div class="form-main">
+              <section class="form-section">
+                <div class="section-heading"><span class="section-index">01</span><div><h2>模型與輸出</h2><p>Hugging Face model ID 或容器中的本地路徑。</p></div></div>
+                <div class="fields two-col">
+                  <label class="field span-2"><span>來源模型</span><input name="model" required value="unsloth/Qwen3.5-9B" placeholder="unsloth/Qwen3.5-9B"></label>
+                  <label class="field"><span>模型載入器</span><select name="model_family"><option value="auto">自動偵測</option><option value="language">文字模型</option><option value="multimodal">多模態模型</option></select></label>
+                  <label class="field"><span>輸出名稱</span><input name="output_name" required value="qwen3.5-finetune" pattern="[a-zA-Z0-9._-]+"><small>實際目錄會加上任務短 ID</small></label>
+                  <label class="field span-2"><span>HF Hub Token（選填）</span><input type="password" name="hf_token" maxlength="2048" autocomplete="off" spellcheck="false" placeholder="hf_..."><small>只保存在 WebUI 私有資料目錄，權限為 0600。</small></label>
+                  <label class="toggle-field span-2"><input type="checkbox" name="load_in_4bit" checked><span class="toggle"></span><span><strong>4-bit QLoRA 載入</strong><small>大幅降低模型載入 VRAM；RTX 5090 建議啟用</small></span></label>
+                </div>
+              </section>
+
+              <section class="form-section">
+                <div class="section-heading"><span class="section-index">02</span><div><h2>資料集</h2><p>混合格式資料應先選擇正確 normalizer，避免把 metadata 當成訓練文字。</p></div></div>
+                <div class="fields two-col">
+                  <label class="field span-2"><span>Hugging Face dataset</span><input name="dataset" required value="mlabonne/FineTome-100k" placeholder="organization/dataset"></label>
+                  <label class="field"><span>Config（選填）</span><input name="dataset_config" placeholder="default"></label>
+                  <label class="field"><span>Split</span><input name="dataset_split" required value="train"></label>
+                  <label class="field"><span>資料格式</span><select name="dataset_format" id="datasetFormat"><option value="sharegpt">ShareGPT conversations</option><option value="messages">OpenAI messages / tools</option><option value="prompt_completion">Prompt + completion</option><option value="text">純文字欄位</option><option value="fable_trace">Complete FABLE row_json</option></select></label>
+                  <label class="field"><span>最多樣本數</span><input type="number" name="max_samples" min="0" max="2000000" value="3000"><small>0 代表全部；先過濾來源再套用上限</small></label>
+                  <label class="field span-2 conditional-field" id="sourceFilterField"><span>原始來源過濾</span><input name="source_filter" placeholder="greghavens/fable-5-coding-and-debugging-traces"><small>對聚合資料依 first_source_dataset 過濾</small></label>
+                  <label class="field conditional-field" id="textFieldWrap"><span>文字欄位</span><input name="text_field" value="text"></label>
+                  <label class="toggle-field"><input type="checkbox" name="filter_overlength" checked><span class="toggle"></span><span><strong>移除過長 trace</strong><small>保護最後 completion 不被截斷</small></span></label>
+                </div>
+                <div class="notice" id="datasetNotice">ShareGPT 會先標準化角色，再套用目前模型的 chat template。</div>
+              </section>
+
+              <section class="form-section">
+                <div class="section-heading"><span class="section-index">03</span><div><h2>LoRA 配置</h2><p>預設涵蓋 attention 與 MLP projection，適合 Qwen/Llama 類架構。</p></div></div>
+                <div class="fields four-col">
+                  <label class="field"><span>Rank (r)</span><input type="number" name="lora_r" min="1" max="512" value="16"></label>
+                  <label class="field"><span>Alpha</span><input type="number" name="lora_alpha" min="1" max="1024" value="16"></label>
+                  <label class="field"><span>Dropout</span><input type="number" name="lora_dropout" min="0" max="0.5" step="0.01" value="0"></label>
+                  <label class="field"><span>Context</span><select name="max_seq_length"><option value="2048">2,048</option><option value="4096" selected>4,096</option><option value="8192">8,192</option><option value="16384">16,384</option><option value="32768">32,768</option></select></label>
+                  <label class="field span-4"><span>Target modules</span><input name="target_modules" value="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"><small>多模態 FastModel 會改用語言層/attention/MLP 開關。</small></label>
+                  <label class="toggle-field span-2"><input type="checkbox" name="assistant_only_loss" checked><span class="toggle"></span><span><strong>只訓練 assistant</strong><small>FABLE prompt/completion 一律只計最後 completion</small></span></label>
+                  <label class="toggle-field span-2"><input type="checkbox" name="packing"><span class="toggle"></span><span><strong>短樣本 packing</strong><small>長 agent trace 通常不建議啟用</small></span></label>
+                </div>
+              </section>
+
+              <details class="form-section" open>
+                <summary><span class="section-index">04</span><span class="summary-copy"><strong>最佳化與排程</strong><small>先用 100 steps 驗證整條管線</small></span><span class="chevron">⌄</span></summary>
+                <div class="fields four-col details-body">
+                  <label class="field"><span>Batch size</span><input type="number" name="batch_size" min="1" value="1"></label>
+                  <label class="field"><span>Gradient accumulation</span><input type="number" name="gradient_accumulation_steps" min="1" value="8"></label>
+                  <label class="field"><span>Learning rate</span><input type="number" name="learning_rate" min="0" max="1" step="0.000001" value="0.0002"></label>
+                  <label class="field"><span>Warmup steps</span><input type="number" name="warmup_steps" min="0" value="10"></label>
+                  <label class="field"><span>Max steps</span><input type="number" name="max_steps" min="0" value="100"><small>0 時改用 epochs</small></label>
+                  <label class="field"><span>Epochs</span><input type="number" name="num_train_epochs" min="0.01" step="0.1" value="1"></label>
+                  <label class="field"><span>Log every</span><input type="number" name="logging_steps" min="1" value="5"></label>
+                  <label class="field"><span>Save every</span><input type="number" name="save_steps" min="1" value="50"></label>
+                  <label class="field"><span>Optimizer</span><select name="optim"><option value="adamw_8bit">AdamW 8-bit</option><option value="adamw_torch">AdamW Torch</option></select></label>
+                  <label class="field"><span>Scheduler</span><select name="lr_scheduler_type"><option value="linear">Linear</option><option value="cosine">Cosine</option><option value="constant">Constant</option></select></label>
+                  <label class="field"><span>Weight decay</span><input type="number" name="weight_decay" min="0" max="1" step="0.001" value="0.01"></label>
+                  <label class="field"><span>Seed</span><input type="number" name="seed" min="0" value="3407"></label>
+                </div>
+              </details>
+            </div>
+
+            <aside class="run-summary">
+              <p class="eyebrow">RUN SUMMARY</p>
+              <h2 id="summaryModel">Qwen3.5-9B</h2>
+              <dl>
+                <div><dt>資料集</dt><dd id="summaryDataset">FineTome-100k</dd></div>
+                <div><dt>有效 batch</dt><dd id="summaryBatch">8</dd></div>
+                <div><dt>Context</dt><dd id="summaryContext">4,096</dd></div>
+                <div><dt>訓練長度</dt><dd id="summaryLength">100 steps</dd></div>
+                <div><dt>精度</dt><dd id="summaryPrecision">4-bit QLoRA</dd></div>
+              </dl>
+              <div class="summary-rule"></div>
+              <p class="summary-note">任務在背景執行。離開頁面不會中止；服務會保留設定、log 與 checkpoints。</p>
+              <button class="primary wide" type="submit" id="submitButton">開始訓練</button>
+            </aside>
+          </div>
+        </form>
+      </section>
+
+      <section class="view" id="jobsView">
+        <div class="page-heading">
+          <div><p class="eyebrow">EXECUTION HISTORY</p><h1>任務紀錄</h1><p class="page-subtitle">檢查設定、即時輸出與失敗原因；重試會自動尋找最後 checkpoint。</p></div>
+          <button class="secondary" id="refreshJobs">重新整理</button>
+        </div>
+        <div class="job-layout">
+          <div class="job-list" id="jobList"><div class="empty-state">尚無任務</div></div>
+          <section class="console-panel">
+            <div class="console-header">
+              <div><span class="status-badge idle" id="selectedStatus">未選擇</span><strong id="selectedTitle">執行日誌</strong></div>
+              <div class="console-actions"><button class="secondary" id="loadConfigButton" hidden>載入設定</button><button class="secondary" id="retryButton" hidden>重試</button><button class="danger" id="cancelButton" hidden>取消</button></div>
+            </div>
+            <pre id="console">選擇左側任務以查看詳細輸出。</pre>
+            <div class="console-footer"><span id="jobMeta">—</span><span id="logPosition">0 bytes</span></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" id="adaptersView">
+        <div class="page-heading">
+          <div><p class="eyebrow">MODEL ARTIFACTS</p><h1>LoRA Adapters</h1><p class="page-subtitle">掃描 `work/outputs` 中完整的 PEFT adapter，顯示底模、rank 與容器路徑。</p></div>
+          <button class="secondary" id="refreshAdapters">重新掃描</button>
+        </div>
+        <div class="adapter-library" id="adapterLibrary"><div class="empty-state">尚無已完成的 adapter。</div></div>
+      </section>
+
+      <section class="view" id="versionsView">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">UPSTREAM SOURCE</p>
+            <h1>Unsloth 版本管理</h1>
+            <p class="page-subtitle">Editable install 直接指向掛載的原始碼；更新或切換版本後，下一個訓練任務即生效，不需重建映像檔。</p>
+          </div>
+          <button class="secondary" id="refreshVersionButton">重新整理</button>
+        </div>
+
+        <section class="panel">
+          <div class="version-summary">
+            <div class="version-commit"><span>目前 commit</span><strong id="unslothCommit">—</strong><small id="unslothSubject">正在讀取...</small></div>
+            <div class="version-meta"><span>版本／來源</span><strong id="unslothTracking">—</strong><small id="unslothCommitTime">—</small></div>
+            <div class="version-meta"><span>遠端最新版</span><strong id="unslothLatest">尚未檢查</strong><small id="unslothUpdateState">按下檢查更新以連線 GitHub</small></div>
+          </div>
+          <div class="notice" id="unslothVersionNotice">版本資訊載入中。</div>
+          <pre class="version-dirty" id="unslothDirtyFiles" hidden></pre>
+        </section>
+
+        <div class="version-actions">
+          <button class="secondary" id="checkVersionButton">檢查更新</button>
+          <button class="primary" id="updateVersionButton" disabled>更新至最新版</button>
+          <button class="danger" id="rollbackVersionButton" disabled>退回上一個版本</button>
+        </div>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">PINNED RELEASE</p><h2>釘選特定版本</h2><p>切換至官方 release tag、branch 或 commit，用於重現既有訓練結果。</p></div>
+            <button class="secondary" id="loadTagsButton">載入 release 清單</button>
+          </div>
+          <div class="version-pin-row">
+            <input id="unslothRefInput" placeholder="例如 2026.7.1、main 或 commit SHA" maxlength="120" spellcheck="false">
+            <button class="secondary" id="pinVersionButton">切換</button>
+          </div>
+          <div class="tag-list" id="unslothTagList"><div class="empty-state">尚未載入 release 清單。</div></div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=3" defer></script>
+</body>
+</html>
+

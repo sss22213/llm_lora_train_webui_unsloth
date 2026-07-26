@@ -1,0 +1,64 @@
+services:
+  unsloth:
+    build: .
+    image: llm-lora-train/unsloth:dev
+    container_name: unsloth
+    # 用 Docker 原生 CDI（Docker >= 28）取代 gpus: all：裝置權限寫進 OCI 規格、
+    # systemd 可見，daemon-reload 不會再收回容器的 GPU 存取權
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              capabilities: [gpu]
+              device_ids:
+                - nvidia.com/gpu=all
+    ipc: host            # PyTorch DataLoader 多 worker 需要較大的共享記憶體
+    restart: unless-stopped
+    environment:
+      JUPYTER_PASSWORD: ${JUPYTER_PASSWORD:-unsloth}
+      HF_TOKEN: ${HF_TOKEN:-}
+    ports:
+      - "6001:8888"      # JupyterLab
+      - "6002:8000"      # Unsloth Studio
+      - "6022:22"        # SSH
+    volumes:
+      - ./unsloth:/opt/unsloth-src         # 本地 Unsloth 原始碼(editable install 指向這裡)
+      - ./work:/workspace/work             # 訓練腳本、資料集、輸出
+      - hf-cache:/workspace/.cache/huggingface  # HF 模型快取(映像檔 HF_HOME 指向此處)
+
+  webui:
+    build: .
+    image: llm-lora-train/unsloth:dev
+    container_name: lora-webui
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: cdi
+              capabilities: [gpu]
+              device_ids:
+                - nvidia.com/gpu=all
+    ipc: host
+    restart: unless-stopped
+    entrypoint: ["/opt/venv/bin/python", "-m", "uvicorn"]
+    command: ["webui.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      APP_DATA_DIR: /workspace/webui-data
+      APP_OUTPUT_DIR: /workspace/work/outputs
+      APP_WORK_DIR: /workspace/work
+      APP_TRAIN_RUNNER: /workspace/work/webui_runner.py
+      APP_UNSLOTH_DIR: /opt/unsloth-src
+    ports:
+      - "6003:8080"            
+    volumes:
+      - ./unsloth:/opt/unsloth-src
+      - ./work:/workspace/work
+      - ./webui:/workspace/webui:ro
+      - ./tests:/workspace/tests:ro
+      - ./webui-data:/workspace/webui-data
+      - hf-cache:/workspace/.cache/huggingface
+
+volumes:
+  hf-cache:
