@@ -209,7 +209,7 @@ details[open] .chevron { transform: rotate(180deg); }
 .console-header strong { font-weight: 500; }
 .console-actions { display: flex; gap: 7px; }
 .console-actions button { min-height: 34px; padding: 6px 10px; }
-#console { min-height: 480px; max-height: 650px; margin: 0; overflow: auto; padding: 18px; color: #c4c8d2; background: #070708; font: 12px/1.65 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+#console, #thinkConsole { min-height: 480px; max-height: 650px; margin: 0; overflow: auto; padding: 18px; color: #c4c8d2; background: #070708; font: 12px/1.65 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .console-footer { border-top: 1px solid var(--hairline); border-bottom: 0; color: var(--ink-tertiary); font: 11px ui-monospace, "SFMono-Regular", Menlo, monospace; }
 
 .adapter-library { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
@@ -279,5 +279,16 @@ details[open] .chevron { transform: rotate(180deg); }
   .span-2, .span-4 { grid-column: span 1; }
   .preset-switcher { display: grid; grid-template-columns: 1fr; width: 100%; }
   .gpu-card-head, .meter-label { display: grid; gap: 2px; }
-  #console { min-height: 400px; }
+  #console, #thinkConsole { min-height: 400px; }
 }
+
+/* 推理補完 */
+.inline-row { display: flex; gap: 6px; }
+.inline-row input { flex: 1; min-width: 0; }
+.think-numbers { margin-top: 16px; }
+.job-layout.think-jobs { min-height: 420px; margin: 0 0 18px; }
+.think-jobs-heading { margin: 22px 0 12px; }
+#thinkConsole { min-height: 320px; max-height: 480px; }
+.card-actions { display: flex; gap: 8px; margin-top: 12px; }
+.card-actions button { flex: 1; }
+.job-card .meter { margin: 4px 0 2px; }

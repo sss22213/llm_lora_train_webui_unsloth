@@ -23,7 +23,7 @@ services:
       - "6002:8000"      # Unsloth Studio
       - "6022:22"        # SSH
     volumes:
-      - ./unsloth:/opt/unsloth-src         # 本地 Unsloth 原始碼(editable install 指向這裡)
+      - ./unsloth:/opt/unsloth-src         # 本地 Unsloth 原始碼(僅供 WebUI「Unsloth 版本」頁讀取；訓練用映像內建版本)
       - ./work:/workspace/work             # 訓練腳本、資料集、輸出
       - hf-cache:/workspace/.cache/huggingface  # HF 模型快取(映像檔 HF_HOME 指向此處)
 
@@ -50,6 +50,9 @@ services:
       APP_WORK_DIR: /workspace/work
       APP_TRAIN_RUNNER: /workspace/work/webui_runner.py
       APP_UNSLOTH_DIR: /opt/unsloth-src
+      APP_OLLAMA_URL: http://host.docker.internal:11434   # 推理補完用的 Ollama（宿主機）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"     # 讓容器能連到宿主機的 Ollama
     ports:
       - "6003:8080"            
     volumes:

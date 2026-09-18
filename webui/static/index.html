@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Unsloth LoRA and QLoRA training workspace">
   <title>LoRA Forge</title>
-  <link rel="stylesheet" href="/static/styles.css?v=3">
+  <link rel="stylesheet" href="/static/styles.css?v=6">
 </head>
 <body>
   <header class="topbar">
@@ -30,6 +30,7 @@
           <button class="nav-item" data-view="create"><span class="nav-icon">＋</span><span>建立訓練</span></button>
           <button class="nav-item" data-view="jobs"><span class="nav-icon">≡</span><span>任務紀錄</span><span class="count" id="jobCount">0</span></button>
           <button class="nav-item" data-view="adapters"><span class="nav-icon">◇</span><span>Adapters</span><span class="count" id="adapterCount">0</span></button>
+          <button class="nav-item" data-view="think"><span class="nav-icon">✎</span><span>推理補完</span></button>
           <button class="nav-item" data-view="versions"><span class="nav-icon">↻</span><span>Unsloth 版本</span></button>
         </nav>
       </div>
@@ -121,7 +122,7 @@
                   <label class="field span-2"><span>Hugging Face dataset</span><input name="dataset" required value="mlabonne/FineTome-100k" placeholder="organization/dataset"></label>
                   <label class="field"><span>Config（選填）</span><input name="dataset_config" placeholder="default"></label>
                   <label class="field"><span>Split</span><input name="dataset_split" required value="train"></label>
-                  <label class="field"><span>資料格式</span><select name="dataset_format" id="datasetFormat"><option value="sharegpt">ShareGPT conversations</option><option value="messages">OpenAI messages / tools</option><option value="prompt_completion">Prompt + completion</option><option value="text">純文字欄位</option><option value="fable_trace">Complete FABLE row_json</option></select></label>
+                  <label class="field"><span>資料格式</span><select name="dataset_format" id="datasetFormat"><option value="sharegpt">ShareGPT conversations</option><option value="messages">OpenAI messages / tools</option><option value="messages_json">r0b0tlab trace（messages / messages_json）</option><option value="prompt_completion">Prompt + completion</option><option value="text">純文字欄位</option><option value="fable_trace">Complete FABLE row_json</option></select></label>
                   <label class="field"><span>最多樣本數</span><input type="number" name="max_samples" min="0" max="2000000" value="3000"><small>0 代表全部；先過濾來源再套用上限</small></label>
                   <label class="field span-2 conditional-field" id="sourceFilterField"><span>原始來源過濾</span><input name="source_filter" placeholder="greghavens/fable-5-coding-and-debugging-traces"><small>對聚合資料依 first_source_dataset 過濾</small></label>
                   <label class="field conditional-field" id="textFieldWrap"><span>文字欄位</span><input name="text_field" value="text"></label>
@@ -140,6 +141,7 @@
                   <label class="field span-4"><span>Target modules</span><input name="target_modules" value="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"><small>多模態 FastModel 會改用語言層/attention/MLP 開關。</small></label>
                   <label class="toggle-field span-2"><input type="checkbox" name="assistant_only_loss" checked><span class="toggle"></span><span><strong>只訓練 assistant</strong><small>FABLE prompt/completion 一律只計最後 completion</small></span></label>
                   <label class="toggle-field span-2"><input type="checkbox" name="packing"><span class="toggle"></span><span><strong>短樣本 packing</strong><small>長 agent trace 通常不建議啟用</small></span></label>
+                  <label class="field span-2"><span>空 think 區塊</span><select name="empty_think"><option value="train">照常訓練（空 think 也算 loss）</option><option value="mask">遮罩不計 loss（建議：留在上下文、不教跳過思考）</option><option value="strip">移除（內容直接接在 assistant 後）</option></select><small>資料沒有推理內容時，Qwen 系 template 會補上空 &lt;think&gt;；只影響 chat 類格式，真正的推理不受影響。</small></label>
                 </div>
               </section>
 
@@ -206,6 +208,71 @@
         <div class="adapter-library" id="adapterLibrary"><div class="empty-state">尚無已完成的 adapter。</div></div>
       </section>
 
+      <section class="view" id="thinkView">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">REASONING DISTILLATION</p>
+            <h1>替資料集補上 think 推理</h1>
+            <p class="page-subtitle">資料集沒有推理內容時，用底模（經 Ollama）在同樣的角色設定與對話歷史下自己思考、自己回一句，寫進 reasoning_content；訓練時就能保住底模的思考長度。生成會佔用 GPU，和訓練互斥。</p>
+          </div>
+          <button class="secondary" id="refreshThink">重新整理</button>
+        </div>
+
+        <div class="history-loader" id="thinkHistoryLoader" hidden>
+          <span class="history-label">載入過去設定</span>
+          <select id="thinkHistorySelect" aria-label="選擇過去的推理補完任務"></select>
+          <button type="button" class="secondary" id="thinkHistoryApplyButton">載入</button>
+        </div>
+
+        <form id="thinkForm" class="form-section">
+          <div class="section-heading"><span class="section-index">01</span><div><h2>產生推理</h2><p>同一個輸出名稱可以重複送出：已完成的樣本會略過，只補剩下的，可以分好幾晚跑。</p></div></div>
+          <div class="fields two-col">
+            <label class="field span-2"><span>來源資料集</span><input name="dataset" required value="Aratako/Synthetic-Japanese-Roleplay-NSFW-DeepSeek-V3-0324-20k-formatted"><small>Hugging Face dataset ID 或容器內路徑；需為 messages（role/content）格式</small></label>
+            <label class="field"><span>Split</span><input name="split" required value="train"></label>
+            <label class="field"><span>輸出名稱</span><input name="output_name" required value="aratako-rp-think" pattern="[a-zA-Z0-9._-]+"><small>寫到 work/datasets/&lt;名稱&gt;/</small></label>
+            <label class="field"><span>模式</span><select name="mode"><option value="free">free：底模自己思考、自己回覆（建議）</option><option value="rationalize">rationalize：給定台詞請底模合理化（實驗）</option></select></label>
+            <label class="field"><span>補哪一回合</span><select name="turn"><option value="last">最後一回合</option><option value="random">隨機一回合（free 模式會截掉後續對話）</option></select></label>
+            <label class="field span-2"><span>推理伺服器</span><select name="api"><option value="ollama">Ollama（/api/chat）</option><option value="openai">llama-server / vLLM（OpenAI 相容 /v1）</option></select><small>Ollama 對 Qwen3.5/3.6/3.8（qwen35 架構）強制並行 1；要多路並行請在伺服器端跑 llama-server -np N，這裡選 llama-server</small></label>
+            <label class="field span-2"><span>伺服器 URL</span><div class="inline-row"><input name="ollama_url" required value="http://host.docker.internal:11434"><button type="button" class="secondary" id="ollamaCheckButton">測試連線</button></div><small id="ollamaStatus">按「測試連線」讀取可用模型清單。</small></label>
+            <label class="field span-2"><span>模型名稱（底模）</span><input name="ollama_model" required value="qwen3.8-27b-heretic-6fcab5-kl:latest" list="ollamaModels"><datalist id="ollamaModels"></datalist><small>要和之後訓練用的底模一致，推理風格才會是底模自己的；llama-server 只載一個模型，填它回報的名稱即可</small></label>
+            <label class="field span-2"><span>API key（選填）</span><input name="api_key" type="password" autocomplete="off" placeholder="vLLM 有設 --api-key 或 VLLM_API_KEY 時填"><small>以 Authorization: Bearer 送出；Ollama、llama-server 不用填</small></label>
+          </div>
+          <div class="fields four-col think-numbers">
+            <label class="field"><span>樣本數</span><input type="number" name="samples" min="1" value="1000"><small>底模思考長時約 100 筆/小時（並行 4）；重點是推理 token 總量</small></label>
+            <label class="field"><span>並行請求</span><input type="number" name="parallel" min="1" max="32" value="4"><small>llama-server 填 -np 的值；Ollama 跑 qwen35 只有 1 路，多送只會排隊逾時</small></label>
+            <label class="field"><span>Seed</span><input type="number" name="seed" min="0" value="3407"><small>同 seed 抽同一批樣本，續跑才接得上</small></label>
+            <label class="field"><span>num_ctx</span><input type="number" name="num_ctx" min="1024" value="16384"><small>要放得下對話加整段思考</small></label>
+            <label class="field"><span>num_predict</span><input type="number" name="num_predict" min="64" value="5120"><small>推理加回覆的 token 上限</small></label>
+            <label class="field"><span>截斷時重抽次數</span><input type="number" name="retry_on_length" min="0" max="10" value="2"><small>底模思考長度是雙峰的，重抽比加大上限省</small></label>
+            <label class="field"><span>推理最少字數</span><input type="number" name="min_think_chars" min="0" value="200"></label>
+            <label class="field"><span>推理最多字數</span><input type="number" name="max_think_chars" min="0" value="6000"><small>約 0.7 token/字，要和訓練的 context 一起算</small></label>
+            <label class="field"><span>回覆最少字數</span><input type="number" name="min_content_chars" min="0" value="10"></label>
+            <div class="field"><span>&nbsp;</span><button class="primary wide" type="submit" id="thinkSubmitButton">開始產生</button></div>
+          </div>
+        </form>
+
+        <div class="panel-heading think-jobs-heading"><div><p class="eyebrow">EXECUTION HISTORY</p><h2>任務紀錄</h2><p>產生與組建的每一次執行都會保留設定與日誌；服務重啟後仍在。</p></div></div>
+        <div class="job-layout think-jobs">
+          <div class="job-list" id="thinkJobList"><div class="empty-state">尚無推理補完任務</div></div>
+          <section class="console-panel">
+            <div class="console-header">
+              <div><span class="status-badge idle" id="thinkStatus">未選擇</span><strong id="thinkTitle">執行日誌</strong></div>
+              <div class="console-actions"><button class="secondary" id="thinkLoadConfigButton" hidden>載入設定</button><button class="danger" id="thinkCancelButton" hidden>取消</button></div>
+            </div>
+            <pre id="thinkConsole">選擇左側任務以查看輸出。</pre>
+            <div class="console-footer"><span id="thinkMeta">—</span><span id="thinkLogPosition">0 bytes</span></div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">DATASETS</p><h2>已產生的資料集</h2><p>「組出 train.jsonl」套用上方的字數門檻；組好後可一鍵帶入訓練表單（messages 格式、空 think 遮罩不計 loss）。</p></div>
+            <label class="toggle-field"><input type="checkbox" id="thinkOnlyWithThink"><span class="toggle"></span><span><strong>只輸出含推理的樣本</strong><small>預設輸出全部樣本，含推理的只是其中一部分</small></span></label>
+          </div>
+          <div class="adapter-library" id="thinkDatasets"><div class="empty-state">尚無資料集。</div></div>
+        </section>
+      </section>
+
       <section class="view" id="versionsView">
         <div class="page-heading">
           <div>
@@ -248,7 +315,7 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=3" defer></script>
+  <script src="/static/app.js?v=6" defer></script>
 </body>
 </html>
 

@@ -11,7 +11,7 @@ reuse of past training configurations.
 
 ```
 llm_lora_train/
-├── Dockerfile             # Official unsloth/unsloth image + local source editable install
+├── Dockerfile             # Official unsloth/unsloth image (pinned by digest) + LoRA Forge deps
 ├── docker-compose.yml     # GPU (Docker native CDI), ports, volumes
 ├── .env.example           # Environment variable template (copy to .env)
 ├── DESIGN.md              # WebUI design system (Linear-style dark theme)
@@ -122,26 +122,79 @@ transformers. If the training log stops showing the「Unsloth 快取修補」lin
 after an upgrade, upstream has fixed the bug and this patch can be removed.
 See [work/patches/README.md](work/patches/README.md) for details.
 
-## unsloth/ — vendored source
+## Base image and unsloth/ source
 
-`unsloth/` is the full source of
-[unslothai/unsloth](https://github.com/unslothai/unsloth) (vendored from
-upstream commit `bb80602`, 2026-07-14, Apache-2.0; the original LICENSE ships
-inside the directory). Its `.git` has been removed and the directory is
-managed directly by this project's git. The container points an editable
-install at this directory, so source changes take effect on the **next
-training job** (each job is a separate python process) — no image rebuild
-required. JupyterLab kernels that already imported unsloth need a restart.
+The training stack (unsloth, unsloth_zoo, transformers, trl, torch) is the one
+shipped inside the official `unsloth/unsloth` image, pinned **by digest** in the
+`Dockerfile` (`ARG UNSLOTH_IMAGE`). `docker compose build` therefore never
+changes the environment silently; to move to a newer image, pick a digest
+(`docker buildx imagetools inspect unsloth/unsloth:<tag>` or the tag list on
+Docker Hub), update the ARG, rebuild, and re-run a 100-step smoke job. The
+build prints the resolved `python | torch | transformers | trl | unsloth | …`
+versions right after the base image is loaded.
 
-> Note: the WebUI's "Unsloth version" page is git-based (check for updates,
-> pin tags, rollback) and shows as unavailable in vendored mode. To update
-> unsloth, sync upstream manually, for example:
->
-> ```bash
-> git clone --depth 1 https://github.com/unslothai/unsloth.git /tmp/unsloth-new
-> rsync -a --delete --exclude '.git' /tmp/unsloth-new/ unsloth/
-> git add unsloth && git commit -m "unsloth: sync upstream <commit>"
-> ```
+Nightly images since 2026-09 keep the venv at `/opt/unsloth-venv`; the
+Dockerfile symlinks it to `/opt/venv`, so `docker-compose.yml`, this README and
+old job records can keep using `/opt/venv/bin/python`.
+
+`unsloth/` is a plain copy of upstream
+[unslothai/unsloth](https://github.com/unslothai/unsloth) (commit `bb80602`,
+2026-07-14, Apache-2.0, license file inside). It is **no longer installed** into
+the container; it is only mounted at `/opt/unsloth-src` for the WebUI's
+"Unsloth version" page, which is git-based and shows as unavailable for a plain
+copy. To override the image's unsloth with your own checkout again, replace
+`unsloth/` with a real git clone and add
+`pip install --no-deps -e /opt/unsloth-src` back to the `Dockerfile`.
+
+## Reasoning distillation (推理補完)
+
+Chat datasets that ship only `role`/`content` (no reasoning) teach a thinking
+model to skip its `<think>` phase. The **推理補完** view fixes that: it runs
+`work/rationalize_think.py` against an Ollama server on the host, letting the
+base model think and reply itself under the dataset's own system prompt and
+history, and stores the reasoning as `reasoning_content` on the last assistant
+turn. Qwen's chat template renders it as a real `<think>` block, so the LoRA
+learns to reason in-domain instead of learning to stop.
+
+- Generation is resumable: submitting the same output name again skips finished
+  samples. Output lives in `work/datasets/<name>/` (`generated.jsonl`,
+  `train.jsonl`, `meta.json`, `build_stats.json`).
+- Generation through a *local* Ollama holds the GPU, so it is mutually
+  exclusive with training jobs; a remote server (RunPod etc.) is not.
+  Building `train.jsonl` can run while generation is still going.
+- "組出 train.jsonl" applies the length thresholds and writes the training set;
+  "用它建立訓練" pre-fills the training form (messages format, empty `<think>`
+  blocks masked from the loss).
+- The container reaches the host's Ollama via `host.docker.internal`
+  (`extra_hosts` + `APP_OLLAMA_URL` in `docker-compose.yml`); override the URL in
+  the form if Ollama runs elsewhere.
+
+### Parallel generation with llama-server
+
+Ollama serves the `qwen35` / `qwen35moe` architectures (Qwen3.5, 3.6, 3.8) one
+request at a time: `server/sched.go` blocklists them and ignores
+`OLLAMA_NUM_PARALLEL` (see ollama/ollama#14510, fix pending in #17144). For
+batched generation run llama.cpp's `llama-server` on the same GGUF instead and
+pick **llama-server / vLLM (OpenAI-compatible /v1)** as the 推理伺服器 in the
+form (`--api openai` on the CLI). The script then streams
+`/v1/chat/completions` and reads `delta.reasoning_content`; llama-server needs
+`--jinja` (reasoning is split by `--reasoning-format auto`, the default).
+
+Ollama keeps the model as a plain GGUF under `$OLLAMA_MODELS/blobs/`, so no
+re-download is needed. On a pod that already has the model pulled:
+
+```bash
+GGUF=/workspace/ollama/blobs/$(ls -S /workspace/ollama/blobs | head -1)   # largest blob = the Q6_K model
+llama-server -m "$GGUF" --host 0.0.0.0 --port 11434 -a qwen3.8-27b-heretic \
+  -ngl 99 -np 12 -c 196608 -fa on -ctk q8_0 -ctv q8_0 --jinja --reasoning-format auto
+```
+
+`-np` is the number of slots (set the form's 並行請求 to the same value) and
+`-c` is the total context shared by all slots (12 × 16384 here; check the
+`n_ctx_seq` line in the log). The official CUDA image
+`ghcr.io/ggml-org/llama.cpp:server-cuda` runs the same command with
+`/app/llama-server` as its entrypoint. Q6_K weights (≈22 GB) plus a q8_0 KV
+cache for 12 × 16k tokens fit a 48 GB card; a 96 GB card takes `-np 20`.
 
 ## Notes
 

@@ -6,6 +6,7 @@ import argparse
 import importlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -29,11 +30,89 @@ def json_tools(value):
     return json.loads(value) if isinstance(value, str) else value
 
 
+# Qwen3 系列的 chat template 對沒有 reasoning_content 的 assistant 回合會補上
+# 「<think>\n\n</think>\n\n」；只訓練 assistant 時這段落在 loss 區間，等於反覆
+# 教模型「不要思考」。有內容的 think 區塊（真正的推理）不會被動到。
+EMPTY_THINK = re.compile(r"<think>\n\s*</think>\n\n")
+
+
+def strip_empty_think_blocks(text: str) -> str:
+    return EMPTY_THINK.sub("", text)
+
+
+# 空 think 的三種處理：train（照常算 loss）、mask（留在上下文但標 -100，內容在
+# 已關閉的 think 之後學，和推理時的位置一致）、strip（整段移除）。舊設定的
+# strip_empty_think=True 視為 strip。
+EMPTY_THINK_MODES = ("train", "mask", "strip")
+
+
+def resolve_empty_think_mode(config: dict) -> str:
+    mode = config.get("empty_think")
+    if mode in EMPTY_THINK_MODES:
+        return mode
+    return "strip" if config.get("strip_empty_think") else "train"
+
+
+def mask_empty_think_labels(input_ids, labels, marker, blank) -> list:
+    """把緊接在 assistant marker 後面的空 think token 標成 -100，回傳新的 labels。"""
+    seq = list(marker) + list(blank)
+    n_marker, n_seq = len(marker), len(seq)
+    input_ids = list(input_ids)
+    labels = list(labels)
+    j = 0
+    while j <= len(input_ids) - n_seq:
+        if input_ids[j] == seq[0] and input_ids[j : j + n_seq] == seq:
+            for k in range(j + n_marker, j + n_seq):
+                labels[k] = -100
+            j += n_seq
+        else:
+            j += 1
+    return labels
+
+
+# Qwen3.5/3.8、Gemma-4 這類附視覺塔的底模，unsloth 回傳的是 Processor（內含
+# .tokenizer）。TRL 原生的資料前處理拿 Processor 直接 tokenize 純文字時會多
+# 一層 batch 維度（[[ids]]），train_on_responses_only 因而找不到 assistant
+# marker、把整個資料集遮成 -100（unsloth 2026.9 + trl 0.24 實際踩到）。這裡
+# 的訓練資料全是純文字，一律把內層 tokenizer 交給 SFTTrainer；儲存 adapter
+# 仍用原本的物件，輸出內容不變。
+def text_tokenizer_of(tokenizer):
+    return getattr(tokenizer, "tokenizer", tokenizer)
+
+
+def assert_flat_input_ids(dataset) -> None:
+    """SFTTrainer 前處理後的 input_ids 必須是一維 token 序列，否則提早失敗。"""
+    try:
+        first = dataset[0]["input_ids"]
+    except (KeyError, IndexError, TypeError):
+        return
+    if hasattr(first, "tolist"):
+        first = first.tolist()
+    if first and isinstance(first[0], (list, tuple)):
+        raise RuntimeError(
+            "SFTTrainer 產生的 input_ids 多了一層 batch 維度（[[ids]]），通常是把 "
+            "Processor 而非 tokenizer 交給了 SFTTrainer；這會讓 "
+            "train_on_responses_only 找不到 assistant marker"
+        )
+
+
 def main(config: dict) -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     # 減少 CUDA allocator 碎片：27B QLoRA + 8192 context 在 32GB 卡上很緊，
     # OOM 當下曾有 1.45 GiB「reserved but unallocated」。需在首次 CUDA 呼叫前設定。
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    # 官方映像檔把 UNSLOTH_VLLM_STANDBY 設成 1（GRPO/RL 讓 vLLM 常駐共用顯存用）。
+    # unsloth_zoo 匯入時會因此把上面的 expandable_segments 從 PYTORCH_ALLOC_CONF
+    # 移除（unsloth_zoo/__init__.py 的 UNSLOTH_VLLM_STANDBY == "1" 分支），結果就是
+    # 樣本長度落差大時 allocator 逐步碎片化——曾在第 2153 步累積 5.68 GiB
+    # 「reserved but unallocated」而 OOM。這裡是純 SFT，沒有用 fast_inference，
+    # 且本映像檔的 vllm 已因 transformers 5.x 不可用，直接關掉這個模式。
+    os.environ["UNSLOTH_VLLM_STANDBY"] = "0"
+    # 固定 fused CE loss 每個 chunk 的記憶體上限。預設值是「首次呼叫時剩餘
+    # VRAM 的一半（上限 4 GiB）」，而且被 functools.cache 快取住：等於用第一步
+    # 記憶體還很寬裕時的快照，決定往後每一步的 chunk 大小。訓練後期顯存變緊時
+    # 那個 chunk 就配置不出來（OOM 當下正是卡在 1.75 GiB 的 CE chunk）。
+    os.environ.setdefault("UNSLOTH_CE_LOSS_TARGET_GB", "1.0")
 
     # 先修復編譯快取裡已知的壞產物（unsloth_zoo 對 force_accelerate_hooks
     # 的 getsource bug，詳見 patches/README.md），再 import unsloth。
@@ -112,6 +191,12 @@ def main(config: dict) -> None:
         max_seq_length=max_seq_length,
         load_in_4bit=bool(config.get("load_in_4bit", True)),
     )
+    text_tokenizer = text_tokenizer_of(tokenizer)
+    if text_tokenizer is not tokenizer:
+        event(
+            f"底模附 {type(tokenizer).__name__}，訓練改用內層 "
+            f"{type(text_tokenizer).__name__}（純文字資料）"
+        )
 
     common_lora = {
         "r": int(config["lora_r"]),
@@ -141,7 +226,43 @@ def main(config: dict) -> None:
     if config.get("dataset_config"):
         dataset_args.append(config["dataset_config"])
     event(f"載入資料集 {config['dataset']} / {config['dataset_split']}")
-    dataset = load_dataset(*dataset_args, split=config["dataset_split"])
+    try:
+        dataset = load_dataset(*dataset_args, split=config["dataset_split"])
+    except Exception as exc:
+        dataset_config = config.get("dataset_config")
+        if not dataset_config:
+            # 多 config（子集）的資料集若不指定 config，datasets 會把所有
+            # parquet 混在一起讀，不同 schema 的子集會造成 CastError。
+            hint = "若此資料集有多個 config（子集），請在 WebUI 的「Config」欄位擇一填入後重試"
+            try:
+                from datasets import get_dataset_config_names
+
+                names = get_dataset_config_names(config["dataset"])
+                if len(names) > 1:
+                    hint = (
+                        "此資料集有多個 config（子集），"
+                        "請在 WebUI 的「Config」欄位擇一填入後重試：\n"
+                        + "、".join(names)
+                    )
+            except Exception:  # 列 config 只是輔助，失敗就用一般提示
+                pass
+            raise ValueError(f"載入資料集失敗：{exc}\n{hint}") from exc
+        # 有些 repo 的 YAML configs 只列 config_name、沒寫 data_files（如
+        # r0b0tlab 蒸餾集），此時任何 config 名稱都會退回「讀取全部檔案」，
+        # 混到不同 schema 的子目錄就 CastError。改用 data_dir 直接鎖定
+        # 子目錄重試。
+        dataset = None
+        for data_dir in (f"data/{dataset_config}", dataset_config):
+            event(f"以 config 名稱載入失敗，改用 data_dir={data_dir} 重試")
+            try:
+                dataset = load_dataset(
+                    config["dataset"], data_dir=data_dir, split=config["dataset_split"]
+                )
+                break
+            except Exception:
+                continue
+        if dataset is None:
+            raise
 
     source_filter = config.get("source_filter")
     if source_filter:
@@ -168,14 +289,37 @@ def main(config: dict) -> None:
             return text.removeprefix("<bos>")
         return text
 
+    empty_think = resolve_empty_think_mode(config)
+    if empty_think == "strip":
+        event("移除空 think 區塊：assistant 回合直接接內容，不教模型跳過思考")
+    elif empty_think == "mask":
+        event("遮罩空 think 區塊：保留在上下文但不計 loss，內容在已關閉的 think 之後學")
+
+    def render_postprocess(text: str) -> str:
+        text = strip_bos(text)
+        return strip_empty_think_blocks(text) if empty_think == "strip" else text
+
     if dataset_format == "sharegpt":
         dataset = standardize_sharegpt(dataset)
 
+        # standardize_sharegpt 只轉換 from/value 型資料；已是 role/content 的
+        # 資料集（欄位叫 messages）會原樣通過，不會產生 conversations 欄位。
+        if "conversations" in dataset.column_names:
+            conversation_field = "conversations"
+        elif "messages" in dataset.column_names:
+            event("資料集沒有 conversations 欄位，改用 messages 欄位（role/content 格式）")
+            conversation_field = "messages"
+        else:
+            raise ValueError(
+                "sharegpt 格式需要 conversations 或 messages 欄位；"
+                f"資料集欄位為：{', '.join(dataset.column_names)}"
+            )
+
         def render_sharegpt(example):
             return {
-                "text": strip_bos(
+                "text": render_postprocess(
                     tokenizer.apply_chat_template(
-                        example["conversations"],
+                        example[conversation_field],
                         tokenize=False,
                         add_generation_prompt=False,
                     )
@@ -192,7 +336,7 @@ def main(config: dict) -> None:
             if "tools" in example and example.get("tools"):
                 kwargs["tools"] = json_tools(example["tools"])
             return {
-                "text": strip_bos(
+                "text": render_postprocess(
                     tokenizer.apply_chat_template(
                         example["messages"],
                         tokenize=False,
@@ -203,6 +347,75 @@ def main(config: dict) -> None:
             }
 
         dataset = dataset.map(render_messages, remove_columns=dataset.column_names)
+    elif dataset_format == "messages_json":
+        # r0b0tlab canonical trace：sft_* 子集用原生 messages/tools 欄位，
+        # canonical/smoke 等子集把相同結構存成 JSON 字串（messages_json /
+        # tools_json）；兩種實體格式都支援。
+        if "messages" in dataset.column_names:
+            messages_field, tools_field = "messages", "tools"
+        elif "messages_json" in dataset.column_names:
+            messages_field, tools_field = "messages_json", "tools_json"
+        else:
+            raise ValueError("messages_json 格式需要 messages 或 messages_json 欄位")
+        has_tools = tools_field in dataset.column_names
+
+        def normalize_canonical_tools(raw):
+            tools = json_tools(raw)
+            if not tools:
+                return None
+            normalized = []
+            for tool in tools:
+                function = dict(tool.get("function") or {})
+                # 原生欄位把工具的 JSON schema 存成 parameters_json 字串，
+                # chat template 預期的是展開後的 parameters dict。
+                parameters_json = function.pop("parameters_json", None)
+                if parameters_json:
+                    function.setdefault("parameters", json.loads(parameters_json))
+                normalized.append({**tool, "function": function})
+            return normalized
+
+        def render_canonical(example):
+            raw = example[messages_field]
+            # 缺值以 None／空字串／空列表表示（name、tool_call_id、
+            # reasoning_content、tool_calls），留著會讓部分 chat template 印出
+            # 空 think 區塊或把 None 印成 "None"。trainable 是資料集自用標記
+            #（此資料集僅 assistant 為 True，語意與 assistant-only loss 相同）。
+            messages = []
+            for message in json.loads(raw) if isinstance(raw, str) else raw:
+                cleaned = {
+                    key: value
+                    for key, value in message.items()
+                    if value and key not in ("role", "content", "trainable")
+                }
+                cleaned["role"] = message["role"]
+                cleaned["content"] = message.get("content") or ""
+                # 資料裡 tool call 的 arguments 是 JSON 字串，Qwen3.6 template
+                # 會對它 |items 展開，必須先解析成 dict。
+                for tool_call in cleaned.get("tool_calls", ()):
+                    function = tool_call.get("function") or {}
+                    if isinstance(function.get("arguments"), str):
+                        try:
+                            function["arguments"] = json.loads(function["arguments"])
+                        except json.JSONDecodeError:
+                            pass
+                messages.append(cleaned)
+            kwargs = {}
+            if has_tools:
+                tools = normalize_canonical_tools(example[tools_field])
+                if tools:
+                    kwargs["tools"] = tools
+            return {
+                "text": render_postprocess(
+                    tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=False,
+                        **kwargs,
+                    )
+                )
+            }
+
+        dataset = dataset.map(render_canonical, remove_columns=dataset.column_names)
     elif dataset_format == "text":
         text_field = config["text_field"]
         if text_field not in dataset.column_names:
@@ -265,9 +478,6 @@ def main(config: dict) -> None:
 
     if dataset_format == "fable_trace" and config.get("filter_overlength", True):
         before = len(dataset)
-        # 多模態模型的 tokenizer 是 Processor，直接呼叫時第一個位置參數是
-        # images，會把文字當圖片解碼；計算長度一律用內部的純文字 tokenizer。
-        text_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
 
         def fits_context(example):
             token_ids = text_tokenizer(
@@ -315,10 +525,11 @@ def main(config: dict) -> None:
 
     trainer = SFTTrainer(
         model=model,
-        processing_class=tokenizer,
+        processing_class=text_tokenizer,
         train_dataset=dataset,
         args=SFTConfig(**training_kwargs),
     )
+    assert_flat_input_ids(trainer.train_dataset)
 
     if config.get("assistant_only_loss", True) and not prompt_completion and dataset_format != "text":
         if model_family == "multimodal":
@@ -332,6 +543,28 @@ def main(config: dict) -> None:
             response_part=response_markers[1],
         )
 
+    chat_formats = ("sharegpt", "messages", "messages_json")
+    if empty_think == "mask" and dataset_format in chat_formats and model_family != "multimodal":
+        marker = text_tokenizer("<|im_start|>assistant\n", add_special_tokens=False)["input_ids"]
+        blank = text_tokenizer("<think>\n\n</think>\n\n", add_special_tokens=False)["input_ids"]
+        has_labels = "labels" in trainer.train_dataset.column_names
+
+        def apply_mask(batch):
+            ids_col = batch["input_ids"]
+            labels_col = batch["labels"] if has_labels else ids_col
+            return {
+                "labels": [
+                    mask_empty_think_labels(ids, labels, marker, blank)
+                    for ids, labels in zip(ids_col, labels_col)
+                ]
+            }
+
+        before = trainer.train_dataset[0]["labels"] if has_labels else trainer.train_dataset[0]["input_ids"]
+        trainer.train_dataset = trainer.train_dataset.map(apply_mask, batched=True)
+        after = trainer.train_dataset[0]["labels"]
+        newly_masked = sum(1 for a, b in zip(before, after) if b == -100 and a != -100)
+        event(f"樣本 0 遮罩了 {newly_masked // max(len(blank), 1)} 個空 think 區塊（不計 loss）")
+
     last_checkpoint = get_last_checkpoint(str(checkpoint_dir))
     if last_checkpoint:
         event(f"從 checkpoint 繼續：{last_checkpoint}")
@@ -341,6 +574,10 @@ def main(config: dict) -> None:
     event("儲存 LoRA adapter")
     model.save_pretrained(adapter_dir)
     tokenizer.save_pretrained(adapter_dir)
+    # safetensors 經由 tempfile 寫出（權限 600）且容器內是 root，host 端
+    # 一般使用者會讀不到；統一放開成全域可讀，方便其他專案取用 adapter。
+    for path in adapter_dir.rglob("*"):
+        path.chmod(0o755 if path.is_dir() else 0o644)
     metrics = {
         **stats.metrics,
         "peak_vram_gb": (

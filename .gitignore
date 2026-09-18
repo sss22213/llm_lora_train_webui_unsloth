@@ -8,3 +8,5 @@ work/unsloth_compiled_cache/
 work/*.log
 lora-forge-*.png
 unsloth/studio/frontend/bun.lockb
+work/datasets/
+work/models/

@@ -1,6 +1,7 @@
 "use strict";
 
 const state = {
+  thinkJobs: [], thinkDatasets: [], selectedThinkJobId: null, thinkLogOffset: 0, thinkLogTimer: null,
   jobs: [],
   adapters: [],
   system: null,
@@ -19,7 +20,7 @@ const presets = {
     dataset_format: "sharegpt", source_filter: "", text_field: "text", max_samples: 3000,
     max_seq_length: 4096, load_in_4bit: true, lora_r: 16, lora_alpha: 16,
     lora_dropout: 0, batch_size: 2, gradient_accumulation_steps: 4,
-    assistant_only_loss: true, packing: false, filter_overlength: true,
+    assistant_only_loss: true, packing: false, empty_think: "train", filter_overlength: true,
   },
   "qwen-fable": {
     model: "unsloth/Qwen3.5-9B", model_family: "language", output_name: "qwen3.5-fable-agent",
@@ -27,7 +28,7 @@ const presets = {
     dataset_format: "fable_trace", source_filter: "greghavens/fable-5-coding-and-debugging-traces",
     text_field: "text", max_samples: 3000, max_seq_length: 8192, load_in_4bit: true,
     lora_r: 16, lora_alpha: 16, lora_dropout: 0, batch_size: 1,
-    gradient_accumulation_steps: 8, assistant_only_loss: true, packing: false,
+    gradient_accumulation_steps: 8, assistant_only_loss: true, packing: false, empty_think: "train",
     filter_overlength: true,
   },
   "gemma-finetome": {
@@ -36,7 +37,7 @@ const presets = {
     dataset_format: "sharegpt", source_filter: "", text_field: "text", max_samples: 3000,
     max_seq_length: 2048, load_in_4bit: true, lora_r: 16, lora_alpha: 16,
     lora_dropout: 0, batch_size: 1, gradient_accumulation_steps: 8,
-    assistant_only_loss: false, packing: false, filter_overlength: true,
+    assistant_only_loss: false, packing: false, empty_think: "train", filter_overlength: true,
   },
 };
 
@@ -104,6 +105,7 @@ function showView(name) {
   $("#sidebar").classList.remove("open");
   if (name === "jobs") loadJobs();
   if (name === "adapters") loadAdapters();
+  if (name === "think") { loadThinkJobs(); loadThinkDatasets(); }
   if (name === "versions") loadUnslothVersion();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -177,6 +179,7 @@ function updateDatasetFields() {
   const messages = {
     sharegpt: "ShareGPT 會先標準化角色，再套用目前模型的 chat template。",
     messages: "保留 messages 與 tools 語意，再使用模型原生 chat template。",
+    messages_json: "r0b0tlab trace：支援原生 messages/tools 欄位或 messages_json/tools_json 字串，清理後套用模型原生 chat template。多 config 資料集記得填「Config」欄位（如 sft_balanced）。",
     prompt_completion: "Prompt 只當上下文，TRL 僅對 completion tokens 計算 loss。",
     text: "純文字模式會對整段文字計算 language-modeling loss。",
     fable_trace: "解析 row_json、過濾指定來源，並只訓練每筆 trace 最後的 assistant 目標。",
@@ -214,8 +217,9 @@ function serializeForm(form) {
 async function loadHealth() {
   try {
     state.health = await api("/api/health");
-    $("#healthDot").className = `status-dot ${state.health.active_job ? "busy" : "ok"}`;
-    $("#healthText").textContent = state.health.active_job ? "GPU 任務執行中" : "服務正常";
+    const thinkActive = state.health.active_think_job;
+    $("#healthDot").className = `status-dot ${state.health.active_job || thinkActive ? "busy" : "ok"}`;
+    $("#healthText").textContent = state.health.active_job ? "GPU 任務執行中" : thinkActive ? "推理補完執行中" : "服務正常";
     $("#statService").textContent = "Online";
     $("#statRunner").textContent = state.health.runner_available ? "Runner ready" : "Runner missing";
     renderActiveJob();
@@ -263,6 +267,19 @@ function renderSystem() {
 
 function renderActiveJob() {
   const job = state.health?.active_job;
+  const thinkJob = state.health?.active_think_job;
+  if (!job && thinkJob) {
+    const progress = thinkJob.progress ? `${thinkJob.progress.done.toLocaleString("zh-TW")} / ${thinkJob.progress.total.toLocaleString("zh-TW")}` : "啟動中";
+    $("#statActiveJob").textContent = `推理補完 · ${thinkJob.request.output_name}`;
+    $("#activeJobCard").innerHTML = `<div class="active-job">
+      <span class="status-badge ${thinkJob.status}">${thinkKindNames[thinkJob.kind] || thinkJob.kind}</span>
+      <h3>${escapeHtml(thinkJob.request.output_name)}</h3>
+      <p>${escapeHtml(thinkJob.request.ollama_model || "")}<br>${escapeHtml(progress)}</p>
+      <button class="primary" id="openActiveThink">查看即時日誌</button>
+    </div>`;
+    $("#openActiveThink").addEventListener("click", () => { state.selectedThinkJobId = thinkJob.id; showView("think"); });
+    return;
+  }
   if (!job) {
     $("#activeJobCard").innerHTML = '<div class="empty-state">GPU 目前閒置，可以建立新任務。</div>';
     $("#statActiveJob").textContent = "目前閒置";
@@ -369,7 +386,7 @@ function renderAdapters() {
 }
 
 function gpuBusy() {
-  return Boolean(state.health?.active_job);
+  return Boolean(state.health?.active_job || state.health?.active_think_job?.kind === "generate");
 }
 
 async function loadUnslothVersion(checkRemote = false) {
@@ -530,6 +547,244 @@ async function retrySelected() {
   } catch (error) { toast(error.message, true); }
 }
 
+// ---------------------------------------------------------------------------
+// 推理補完：用底模（經 Ollama）替資料集補上 think 推理
+// ---------------------------------------------------------------------------
+const thinkStatusNames = { queued: "排隊中", running: "執行中", completed: "已完成", failed: "失敗", cancelled: "已取消" };
+const thinkKindNames = { generate: "產生推理", build: "組出 train.jsonl" };
+
+function serializeThinkForm(form) {
+  const data = Object.fromEntries(new FormData(form).entries());
+  ["samples", "parallel", "seed", "num_ctx", "num_predict", "retry_on_length", "min_think_chars", "max_think_chars", "min_content_chars"].forEach((key) => { data[key] = Number.parseInt(data[key], 10); });
+  return data;
+}
+
+async function checkOllama() {
+  const url = $("#thinkForm").elements.ollama_url.value.trim();
+  const backend = $("#thinkForm").elements.api.value;
+  const apiKey = $("#thinkForm").elements.api_key.value.trim();
+  const button = $("#ollamaCheckButton");
+  button.disabled = true;
+  button.textContent = "連線中...";
+  try {
+    const result = await api(`/api/think/ollama?url=${encodeURIComponent(url)}&api=${encodeURIComponent(backend)}&api_key=${encodeURIComponent(apiKey)}`);
+    $("#ollamaModels").innerHTML = result.models.map((model) => `<option value="${escapeHtml(model.name)}"></option>`).join("");
+    $("#ollamaStatus").textContent = `已連線 ${result.url}（${backend === "openai" ? "OpenAI 相容 /v1" : "Ollama"}），${result.models.length} 個模型可從下拉選單挑選`;
+    toast(`連線成功，${result.models.length} 個模型`);
+  } catch (error) {
+    $("#ollamaStatus").textContent = error.message;
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "測試連線";
+  }
+}
+
+async function submitThinkGenerate(event) {
+  event.preventDefault();
+  const button = $("#thinkSubmitButton");
+  button.disabled = true;
+  button.textContent = "建立任務中...";
+  try {
+    const job = await api("/api/think/generate", { method: "POST", body: JSON.stringify(serializeThinkForm(event.currentTarget)) });
+    state.selectedThinkJobId = job.id;
+    toast("推理補完任務已建立，日誌每 10 筆更新一次");
+    await Promise.all([loadHealth(), loadThinkJobs()]);
+  } catch (error) { toast(error.message, true); }
+  finally { button.disabled = false; button.textContent = "開始產生"; }
+}
+
+async function buildThinkDataset(name) {
+  const form = $("#thinkForm");
+  const payload = {
+    output_name: name,
+    min_think_chars: Number.parseInt(form.elements.min_think_chars.value, 10),
+    max_think_chars: Number.parseInt(form.elements.max_think_chars.value, 10),
+    min_content_chars: Number.parseInt(form.elements.min_content_chars.value, 10),
+    only_with_think: $("#thinkOnlyWithThink").checked,
+  };
+  try {
+    const job = await api("/api/think/build", { method: "POST", body: JSON.stringify(payload) });
+    state.selectedThinkJobId = job.id;
+    toast("開始組 train.jsonl");
+    await loadThinkJobs();
+  } catch (error) { toast(error.message, true); }
+}
+
+function useThinkDataset(path) {
+  setFormValue("dataset", path);
+  setFormValue("dataset_config", "");
+  setFormValue("dataset_split", "train");
+  setFormValue("dataset_format", "messages");
+  setFormValue("max_samples", 0);
+  setFormValue("empty_think", "mask");
+  updateDatasetFields();
+  updateSummary();
+  showView("create");
+  toast("已帶入資料集：messages 格式、空 think 遮罩不計 loss，其餘參數請自行調整");
+}
+
+async function loadThinkJobs(pollSelected = true) {
+  try {
+    state.thinkJobs = await api("/api/think/jobs");
+    renderThinkJobs();
+    renderThinkHistoryOptions();
+    if (state.selectedThinkJobId) selectThinkJob(state.selectedThinkJobId, false, pollSelected);
+  } catch (error) { toast(error.message, true); }
+}
+
+function setThinkFormValue(name, value) {
+  const input = $("#thinkForm").elements[name];
+  if (!input) return;
+  if (input.type === "checkbox") { input.checked = Boolean(value); return; }
+  input.value = value ?? "";
+}
+
+function applyThinkJobConfig(jobId) {
+  const job = state.thinkJobs.find((item) => item.id === jobId);
+  if (!job?.request) { toast("找不到該任務的設定", true); return; }
+  if (job.kind === "generate") {
+    Object.entries(job.request).forEach(([key, value]) => setThinkFormValue(key, value));
+  } else {
+    setThinkFormValue("output_name", job.request.output_name);
+    setThinkFormValue("min_think_chars", job.request.min_think_chars);
+    setThinkFormValue("max_think_chars", job.request.max_think_chars);
+    setThinkFormValue("min_content_chars", job.request.min_content_chars);
+    $("#thinkOnlyWithThink").checked = Boolean(job.request.only_with_think);
+  }
+  const select = $("#thinkHistorySelect");
+  if (select && state.thinkJobs.some((item) => item.id === jobId && item.kind === "generate")) select.value = jobId;
+  $("#thinkForm").scrollIntoView({ behavior: "smooth", block: "start" });
+  toast(`已載入「${thinkKindNames[job.kind] || job.kind} · ${job.request.output_name}」的設定，可調整後重新送出`);
+}
+
+function renderThinkHistoryOptions() {
+  const loader = $("#thinkHistoryLoader");
+  const select = $("#thinkHistorySelect");
+  const generateJobs = state.thinkJobs.filter((job) => job.kind === "generate");
+  if (!generateJobs.length) { loader.hidden = true; return; }
+  const previous = select.value;
+  select.innerHTML = generateJobs.map((job) => {
+    const label = `${job.request.output_name} · ${job.request.mode} · ${Number(job.request.samples).toLocaleString("zh-TW")} 筆 · ${formatDate(job.created_at)} · ${thinkStatusNames[job.status]}`;
+    return `<option value="${job.id}">${escapeHtml(label)}</option>`;
+  }).join("");
+  if (generateJobs.some((job) => job.id === previous)) select.value = previous;
+  loader.hidden = false;
+}
+
+function thinkProgressHtml(job) {
+  const progress = job.progress;
+  if (!progress || !progress.total) return "";
+  const percent = Math.min(100, Math.round(progress.done / progress.total * 100));
+  return `<div class="meter"><span style="width:${percent}%"></span></div><small>${progress.done.toLocaleString("zh-TW")} / ${progress.total.toLocaleString("zh-TW")}（${percent}%）</small>`;
+}
+
+function renderThinkJobs() {
+  const list = $("#thinkJobList");
+  if (!state.thinkJobs.length) {
+    list.innerHTML = '<div class="empty-state">尚無推理補完任務。</div>';
+    return;
+  }
+  list.innerHTML = state.thinkJobs.map((job) => {
+    const detail = job.kind === "generate"
+      ? `${job.request.mode} · ${job.request.ollama_model} · ${Number(job.request.samples).toLocaleString("zh-TW")} 筆`
+      : `推理 ${job.request.min_think_chars} 到 ${job.request.max_think_chars || "∞"} 字${job.request.only_with_think ? " · 只含推理" : ""}`;
+    return `<button class="job-card ${job.id === state.selectedThinkJobId ? "selected" : ""}" data-think-id="${job.id}">
+      <div class="job-card-top"><strong>${escapeHtml(thinkKindNames[job.kind] || job.kind)} · ${escapeHtml(job.request.output_name)}</strong><span class="status-badge ${job.status}">${thinkStatusNames[job.status]}</span></div>
+      <small>${escapeHtml(detail)}</small>
+      ${thinkProgressHtml(job)}
+      <div class="job-card-meta"><span>${formatDate(job.created_at)}</span><span>${duration(job)}</span></div>
+    </button>`;
+  }).join("");
+  $$("[data-think-id]").forEach((card) => card.addEventListener("click", () => selectThinkJob(card.dataset.thinkId)));
+}
+
+function selectThinkJob(jobId, resetLog = true, startPolling = true) {
+  const job = state.thinkJobs.find((item) => item.id === jobId);
+  if (!job) return;
+  state.selectedThinkJobId = jobId;
+  renderThinkJobs();
+  $("#thinkStatus").className = `status-badge ${job.status}`;
+  $("#thinkStatus").textContent = thinkStatusNames[job.status];
+  $("#thinkTitle").textContent = `${thinkKindNames[job.kind] || job.kind} · ${job.request.output_name}`;
+  $("#thinkMeta").textContent = `${job.id} · ${duration(job)}${job.error ? ` · ${job.error}` : ""}`;
+  $("#thinkCancelButton").hidden = !["queued", "running"].includes(job.status);
+  $("#thinkLoadConfigButton").hidden = false;
+  if (resetLog) {
+    state.thinkLogOffset = 0;
+    $("#thinkConsole").textContent = "";
+  }
+  if (startPolling) pollThinkLog();
+}
+
+async function pollThinkLog() {
+  clearTimeout(state.thinkLogTimer);
+  if (!state.selectedThinkJobId) return;
+  const consoleElement = $("#thinkConsole");
+  try {
+    const stickToBottom = consoleElement.scrollTop + consoleElement.clientHeight >= consoleElement.scrollHeight - 32;
+    const result = await api(`/api/think/jobs/${state.selectedThinkJobId}/log?offset=${state.thinkLogOffset}`);
+    if (result.content) consoleElement.textContent += result.content;
+    state.thinkLogOffset = result.offset;
+    $("#thinkLogPosition").textContent = formatBytes(state.thinkLogOffset);
+    if (stickToBottom) consoleElement.scrollTop = consoleElement.scrollHeight;
+  } catch (error) { /* job list may have been refreshed */ }
+  const job = state.thinkJobs.find((item) => item.id === state.selectedThinkJobId);
+  if (job && ["queued", "running"].includes(job.status)) {
+    state.thinkLogTimer = setTimeout(async () => { await loadThinkJobs(false); pollThinkLog(); }, 2500);
+  } else {
+    loadThinkDatasets();
+  }
+}
+
+async function cancelThinkJob() {
+  if (!state.selectedThinkJobId || !window.confirm("確定要取消？已完成的樣本會保留，之後用同一個輸出名稱可以續跑。")) return;
+  try {
+    await api(`/api/think/jobs/${state.selectedThinkJobId}/cancel`, { method: "POST" });
+    toast("已送出取消指令");
+    await Promise.all([loadThinkJobs(), loadHealth()]);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function loadThinkDatasets() {
+  try {
+    state.thinkDatasets = await api("/api/think/datasets");
+    renderThinkDatasets();
+  } catch (error) { toast(error.message, true); }
+}
+
+function renderThinkDatasets() {
+  const box = $("#thinkDatasets");
+  if (!state.thinkDatasets.length) {
+    box.innerHTML = '<div class="empty-state">尚無資料集，先在上方產生推理。</div>';
+    return;
+  }
+  box.innerHTML = state.thinkDatasets.map((item) => {
+    const stats = item.build_stats || {};
+    const built = Number.isFinite(item.train_rows);
+    const withThink = Number.isFinite(stats.with_think) ? stats.with_think.toLocaleString("zh-TW") : "—";
+    const source = item.meta?.dataset || "";
+    return `<article class="adapter-card">
+      <div class="adapter-card-head"><h2>${escapeHtml(item.name)}</h2><span class="status-badge ${built ? "completed" : "queued"}">${built ? "READY" : "未組"}</span></div>
+      <dl>
+        <div><dt>來源</dt><dd title="${escapeHtml(source)}">${escapeHtml(source.split("/").pop() || "—")}</dd></div>
+        <div><dt>模式</dt><dd>${escapeHtml(item.meta?.mode || "—")} · ${escapeHtml(item.meta?.turn || "—")}</dd></div>
+        <div><dt>已生成</dt><dd>${Number(item.generated_rows || 0).toLocaleString("zh-TW")} 筆</dd></div>
+        <div><dt>train.jsonl</dt><dd>${built ? `${item.train_rows.toLocaleString("zh-TW")} 筆，含推理 ${withThink}` : "尚未組出"}</dd></div>
+        <div><dt>更新</dt><dd>${formatDate(item.train_at || item.generated_at)}</dd></div>
+      </dl>
+      <div class="path-box"><code title="${escapeHtml(item.path)}">${escapeHtml(item.path)}</code><button class="copy-button copy-think-path" data-copy="${escapeHtml(item.path)}">複製</button></div>
+      <div class="card-actions"><button class="secondary" data-build="${escapeHtml(item.name)}">組出 train.jsonl</button><button class="primary" data-use="${escapeHtml(item.path)}" ${built ? "" : "disabled"}>用它建立訓練</button></div>
+    </article>`;
+  }).join("");
+  $$(".copy-think-path").forEach((button) => button.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(button.dataset.copy);
+    toast("已複製資料集路徑");
+  }));
+  $$("[data-build]").forEach((button) => button.addEventListener("click", () => buildThinkDataset(button.dataset.build)));
+  $$("[data-use]").forEach((button) => button.addEventListener("click", () => useThinkDataset(button.dataset.use)));
+}
+
 function bindEvents() {
   $$(".nav-item").forEach((button) => button.addEventListener("click", () => showView(button.dataset.view)));
   $$("[data-preset]").forEach((button) => button.addEventListener("click", () => applyPreset(button.dataset.preset)));
@@ -552,6 +807,12 @@ function bindEvents() {
   $("#pinVersionButton").addEventListener("click", () => pinUnsloth());
   $("#unslothRefInput").addEventListener("keydown", (event) => { if (event.key === "Enter") pinUnsloth(); });
   $("#loadTagsButton").addEventListener("click", loadUnslothTags);
+  $("#refreshThink").addEventListener("click", () => { loadThinkJobs(); loadThinkDatasets(); });
+  $("#thinkForm").addEventListener("submit", submitThinkGenerate);
+  $("#ollamaCheckButton").addEventListener("click", checkOllama);
+  $("#thinkCancelButton").addEventListener("click", cancelThinkJob);
+  $("#thinkLoadConfigButton").addEventListener("click", () => { if (state.selectedThinkJobId) applyThinkJobConfig(state.selectedThinkJobId); });
+  $("#thinkHistoryApplyButton").addEventListener("click", () => { const id = $("#thinkHistorySelect").value; if (id) applyThinkJobConfig(id); });
 }
 
 async function initialize() {
